@@ -49,6 +49,10 @@ Training writes checkpoints and `results.json`; evaluation also saves prediction
 `best.pt.gz` is selected by validation nRMSE, and `last.pt.gz` supports resuming.
 The example uses two training updates and is not a benchmark experiment.
 
+Input pass rate measures reconstruction at t=0. Detail horizon measures the
+consecutive valid predicted steps from t=1, normalized by rollout length and
+averaged over all test trajectories; initial failure does not gate this horizon.
+
 The code includes seven time-dependent PDEBench families, U-Net/FNO/ConvLSTM/
 Transformer predictors, and the Primitive, BestSingleDerived, DerivBase,
 DerivOpt, ArchMulti, RolloutMulti and LatentAE-Hyper methods. Small Expert and

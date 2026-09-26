@@ -74,6 +74,7 @@ class BudgetedSimulator(nn.Module):
         budget_ratio: float = 0.25,
         prediction_mode: str = "direct",
         arch_width: int | None = None,
+        arch_recurrence: str = "fine_branch_only",
     ) -> None:
         super().__init__()
         self.method = canonical_method(method)
@@ -100,6 +101,8 @@ class BudgetedSimulator(nn.Module):
             raise ValueError("BudgetedSimulator currently supports CPU codec execution only")
         if prediction_mode not in {"direct", "residual"}:
             raise ValueError("prediction_mode must be 'direct' or 'residual'")
+        if arch_recurrence != "fine_branch_only":
+            raise ValueError("ArchMulti supports only fine_branch_only persistent recurrence")
         self.prediction_mode = prediction_mode
         self.budget = PayloadBudget(math.prod(self.coarse_shape), self.channels, budget_ratio)
         if (mean is None) != (std is None):
@@ -114,6 +117,8 @@ class BudgetedSimulator(nn.Module):
         self.register_buffer("primitive_mean", mean_tensor)
         self.register_buffer("primitive_std", std_tensor)
         self.model_kwargs = dict(model_kwargs or {})
+        if backbone.lower().replace("-", "").replace("_", "") == "convlstm":
+            self.model_kwargs.setdefault("stateful", True)
         self.latent_kwargs = dict(latent_kwargs or {})
         if {"name", "spatial_dim", "in_channels", "out_channels"} & self.model_kwargs.keys():
             raise ValueError("Predictor family/dimensions/channels are controlled by the simulator")
@@ -170,7 +175,7 @@ class BudgetedSimulator(nn.Module):
             "model_kwargs": copy.deepcopy(self.model_kwargs),
             "latent_kwargs": copy.deepcopy(self.latent_kwargs),
             "budget_ratio": float(budget_ratio), "prediction_mode": prediction_mode,
-            "arch_width": self.arch_width,
+            "arch_width": self.arch_width, "arch_recurrence": arch_recurrence,
         }
         self.protocol = {
             "predictor_input": "decoded_coarse_residual_primitive",
@@ -356,11 +361,23 @@ class BudgetedSimulator(nn.Module):
     def from_checkpoint_state(cls, state: dict[str, Any]) -> "BudgetedSimulator":
         if state.get("format_version") != 1:
             raise ValueError("Unsupported simulator checkpoint version")
+        config = copy.deepcopy(state["config"])
+        if config["backbone"].lower().replace("-", "").replace("_", "") == "convlstm":
+            if (canonical_method(config["method"]) in {"archmulti", "derivopt_archmulti"}
+                    and config.get("model_kwargs", {}).get("stateful", False)
+                    and "arch_recurrence" not in config):
+                raise ValueError(
+                    "Legacy stateful ConvLSTM ArchMulti checkpoint used two persistent branches; "
+                    "it cannot be loaded as the fine-branch-only model. Train a new checkpoint."
+                )
+            # Older checkpoints omitted this setting and used the backbone's
+            # stateless default. Preserve that recorded model's behavior.
+            config.setdefault("model_kwargs", {}).setdefault("stateful", False)
         geometry = Geometry.from_state_dict(state["geometry"])
         calibration = CalibratedState.from_state_dict(state["calibration"])
         simulator = cls(
             calibration, state["design_bits"], geometry,
-            mean=state["normalization_mean"], std=state["normalization_std"], **state["config"],
+            mean=state["normalization_mean"], std=state["normalization_std"], **config,
         )
         simulator.load_state_dict(state["module_state"])
         simulator.protocol = copy.deepcopy(state["protocol"])

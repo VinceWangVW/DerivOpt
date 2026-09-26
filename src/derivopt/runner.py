@@ -14,7 +14,7 @@ from .geometry import Geometry
 from .io import dataset_identity, load_torch, remap_trajectory_ids, save_json, save_torch, validate_dataset_identity
 from .metrics import build_fine_mask, compute_metrics, detail_horizon, detail_horizon_steps
 from .preparation import PreparedState, prepare
-from .protocol import MetricProtocol
+from .protocol import HORIZON_PROTOCOL, HORIZON_UNITS, MetricProtocol
 from .simulation import BudgetedSimulator
 
 
@@ -94,6 +94,11 @@ def _loss(simulator, initial, targets, config):
             loss = loss + config.latent_rate_weight*info["rate_loss"] + config.latent_reconstruction_weight*info["codec_reconstruction_loss"]
         losses.append(loss)
         ledger_bits.extend(ledger.total_bits for ledger in info["ledgers"])
+        if config.method != "rolloutmulti":
+            # Recurrent teacher forcing trains one-step predictions along a
+            # short sequence. Only RolloutMulti feeds its predicted field back
+            # during training; both retain gradients through recurrent history.
+            current = target
     return torch.stack(losses).mean(), ledger_bits
 
 
@@ -118,6 +123,8 @@ def score_predictions(predictions, geometry, protocol=MetricProtocol()):
         estimated, truth = record["predicted"], record["target"]
         if estimated.shape != truth.shape or estimated.ndim != geometry.basis.ndim+2:
             raise ValueError("prediction record must be matching [time,channel,*fine] fields")
+        if estimated.shape[0] < 2:
+            raise ValueError("prediction record needs t=0 and at least one predicted frame")
         # Frames act as independent batch entries for the metric calculation.
         measured = compute_metrics(estimated, truth, geometry.basis, mask, fine, protocol=protocol)
         passed = measured["input_pass"].unsqueeze(0)
@@ -129,12 +136,18 @@ def score_predictions(predictions, geometry, protocol=MetricProtocol()):
                "rollout_steps": estimated.shape[0]-1, "input_fine_rel": float(measured["fine_rel"][0]),
                "input_q_fine": float(measured["q_fine"][0]), "input_e_out": float(measured["e_out"][0]),
                "input_pass": bool(measured["input_pass"][0]), "finite": bool(measured["finite_mask"].all()),
-               "timesteps": measured, "payload_bits": record.get("payload_bits", [])}
+               "timesteps": measured, "payload_bits": record.get("payload_bits", []),
+               "internal_recurrent_state_bytes": record.get("internal_recurrent_state_bytes"),
+               "metric_protocol": asdict(protocol),
+               "horizon_protocol": HORIZON_PROTOCOL,
+               "horizon_units": HORIZON_UNITS}
+        if record.get("times") is not None:
+            row["evaluation_time_window"] = [float(record["times"][0]), float(record["times"][-1])]
         rows.append(row)
     return {"rows": rows, "summary": _summary(rows), "metric_protocol": asdict(protocol),
             "horizon_units": {"detail_horizon": "normalized", "detail_horizon_normalized": "normalized",
-                              "detail_horizon_steps": "transitions"},
-            "horizon_protocol": "longest_contiguous_prefix_including_t0; unconditional_trajectory_mean"}
+                              "detail_horizon_steps": "prediction_steps"},
+            "horizon_protocol": HORIZON_PROTOCOL}
 
 
 @torch.no_grad()
@@ -166,7 +179,12 @@ def evaluate_simulator(simulator, dataset, *, horizon, max_trajectories=None, pr
             payloads.append(info["ledgers"][0].total_bits)
         predictions.append({"trajectory_id": sample.metadata["trajectory_id"], "predicted": torch.stack(estimated),
                             "target": sample.states[:steps+1].clone(), "times": sample.times[:steps+1].clone(),
-                            "payload_bits": payloads})
+                            "payload_bits": payloads,
+                            "internal_recurrent_state_bytes": sum(
+                                tensor.numel() * tensor.element_size()
+                                for module in simulator.predictor.modules()
+                                if getattr(module, "_state", None) is not None
+                                for pair in module._state for tensor in pair)})
     return score_predictions(predictions, simulator.geometry, protocol), predictions
 
 
@@ -190,6 +208,9 @@ def train(data_paths, config: ExperimentConfig, output_dir, *, prepared_path=Non
             raise ValueError("Resume requires a version-2 checkpoint with fixed preparation, source identity and RNG state")
         _validate_identity(resumed.get("dataset_identity"), identity, data_map=data_map)
         old_config = resumed["experiment_config"]
+        if "recurrent_training_steps" not in old_config:
+            old_config = {**old_config, "recurrent_training_steps":
+                          1 if config.backbone == "convlstm" else config.recurrent_training_steps}
         # train_steps means ADDITIONAL updates on resume. All other training,
         # calibration, model, split and evaluation settings stay explicit/fixed.
         for key, value in config.to_dict().items():
@@ -222,7 +243,9 @@ def train(data_paths, config: ExperimentConfig, output_dir, *, prepared_path=Non
     if resume_path:
         optimizer.load_state_dict(resumed["optimizer"])
         torch.set_rng_state(resumed["torch_rng_state"])
-    supervision = config.rollout_supervision if config.method == "rolloutmulti" else 1
+    persistent_recurrence = any(getattr(module, "stateful", False) for module in simulator.predictor.modules())
+    supervision = (config.rollout_supervision if config.method == "rolloutmulti"
+                   else config.recurrent_training_steps if persistent_recurrence else 1)
     windows = TrajectoryWindows(GeometryCheckedDataset(splits["train"], simulator.geometry), history=1, horizon=supervision)
     _check_output_available(output)
     output.mkdir(parents=True, exist_ok=True)
@@ -260,7 +283,8 @@ def train(data_paths, config: ExperimentConfig, output_dir, *, prepared_path=Non
         optimizer.step()
         simulator.detach_state()
         row = {"step": step+1, "loss": float(loss.detach()), "payload_bits": payload_bits,
-               "supervision_steps": supervision}
+               "supervision_steps": supervision,
+               "training_feedback": "predicted" if config.method == "rolloutmulti" else "teacher_forced"}
         improved = False
         if (step+1) % config.validation_every == 0 or step == start_step+config.train_steps-1:
             validation, _ = evaluate_simulator(simulator, splits["val"], horizon=config.rollout_steps,
@@ -303,6 +327,7 @@ def train(data_paths, config: ExperimentConfig, output_dir, *, prepared_path=Non
     save_torch({"geometry": evaluated_simulator.geometry.state_dict(), "predictions": predictions,
                 "config": config.to_dict(), "evaluation_checkpoint": evaluation_role,
                 "evaluation_completed_steps": evaluation_steps, "dataset_identity": identity,
+                "horizon_protocol": HORIZON_PROTOCOL,
                 "data_relocation": relocation}, output/"predictions.pt.gz")
     return record
 
@@ -376,6 +401,7 @@ def evaluate_checkpoint(checkpoint_path, data_paths, output_dir, *, split="test"
     evaluated["dataset_identity"], evaluated["data_relocation"] = identity, relocation
     save_json(evaluated, Path(output_dir)/"evaluation.json")
     save_torch({"geometry": simulator.geometry.state_dict(), "predictions": predictions, "config": config.to_dict(),
+                "horizon_protocol": HORIZON_PROTOCOL,
                 "dataset_identity": identity, "data_relocation": relocation}, Path(output_dir)/"predictions.pt.gz")
     return evaluated
 
@@ -386,5 +412,6 @@ def reevaluate(predictions_path, output_dir, protocol: MetricProtocol):
     geometry = Geometry.from_state_dict(saved["geometry"])
     result = score_predictions(saved["predictions"], geometry, protocol)
     result["source_predictions"] = str(Path(predictions_path).resolve())
+    result["source_horizon_protocol"] = saved.get("horizon_protocol")
     save_json(result, Path(output_dir)/"evaluation.json")
     return result

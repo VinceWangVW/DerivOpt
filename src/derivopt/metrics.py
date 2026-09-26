@@ -150,25 +150,26 @@ def compute_metrics(prediction: torch.Tensor, target: torch.Tensor, basis: Spect
 
 
 def detail_horizon(passed: torch.Tensor) -> torch.Tensor:
-    """Normalized last valid step of the contiguous prefix, including input t=0.
+    """Consecutive valid predictions from t=1, divided by prediction count.
 
-    ``passed`` is bool [B,T]. Both an empty valid prefix and t0-only validity have
-    duration zero. With T=1, return zero: no positive rollout duration was observed.
-    With T>=2, all steps passing gives one. Later recovery never extends a prefix.
+    ``passed`` is bool [B,T+1] and includes the separately evaluated input t=0.
+    Input validity does not gate this metric. A failed predicted frame ends the
+    prefix; later recovery never extends it. With no predicted frames, return 0.
     """
-    if passed.ndim != 2 or passed.dtype != torch.bool or passed.shape[1] < 1:
-        raise ValueError("passed must be a nonempty bool [B,T] tensor including t=0")
-    if passed.shape[1] == 1:
-        return torch.zeros(passed.shape[0], dtype=torch.float64, device=passed.device)
-    prefix_length = passed.to(torch.int64).cumprod(dim=1).sum(dim=1)
-    return (prefix_length - 1).clamp_min(0).to(torch.float64) / (passed.shape[1] - 1)
+    steps = detail_horizon_steps(passed)
+    return steps.to(torch.float64) / max(passed.shape[1] - 1, 1)
 
 
 def detail_horizon_steps(passed: torch.Tensor) -> torch.Tensor:
-    """Number of valid rollout transitions; distinct from an input pass fraction."""
-    # Share shape/boolean validation and the t=0 longest-prefix convention.
-    detail_horizon(passed)
-    return (passed.to(torch.int64).cumprod(dim=1).sum(dim=1)-1).clamp_min(0)
+    """Number of consecutive valid predicted frames starting at t=1.
+
+    The full bool [B,T+1] input includes t=0, which is ignored here and remains
+    available for the separate input pass rate. The first failed prediction
+    stops the prefix, including when the initial reconstruction failed.
+    """
+    if passed.ndim != 2 or passed.dtype != torch.bool or passed.shape[1] < 1:
+        raise ValueError("passed must be a nonempty bool [B,T+1] tensor including t=0")
+    return passed[:, 1:].to(torch.int64).cumprod(dim=1).sum(dim=1)
 
 
 def impute_pilot_failures(nrmse: torch.Tensor, horizon: torch.Tensor, *,

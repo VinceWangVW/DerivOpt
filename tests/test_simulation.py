@@ -59,6 +59,7 @@ def test_explicit_two_optimizer_steps_and_real_ledgers(spatial_dim, backbone):
     before = {name: value.detach().clone() for name, value in model.predictor.named_parameters()}
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     for _ in range(2):
+        model.reset_state()
         optimizer.zero_grad(set_to_none=True)
         predicted, info = model.step(states[:2], actual_codec=False)
         assert predicted.shape == states[:2].shape

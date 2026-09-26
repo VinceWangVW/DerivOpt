@@ -15,7 +15,7 @@ def _fingerprint(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
-def _protocol_check(records, configuration_keys):
+def _protocol_check(records, configuration_keys, metric):
     """Reject incompatible known provenance and expose absent legacy metadata.
 
     Source fingerprints plus evaluated trajectory IDs, or an explicit
@@ -23,11 +23,17 @@ def _protocol_check(records, configuration_keys):
     Rows without test-set metadata retain an explicit unknown status.
     """
     protocol = {}
-    for name in ("library", "split_seed"):
+    for name in ("library", "split_seed", "metric_protocol", "horizon_protocol", "horizon_units"):
         values = {_fingerprint(row.get(name)) for row in records}
         if len(values) != 1:
             raise ValueError(f"Cannot mix different or known/unknown {name} values in one report")
         protocol[name] = records[0].get(name)
+    if metric in ("detail_horizon", "detail_horizon_normalized", "detail_horizon_steps"):
+        if protocol["horizon_protocol"] is None or protocol["horizon_units"] is None:
+            raise ValueError("Horizon reports require explicit horizon_protocol and horizon_units; "
+                             "re-evaluate saved predictions when metric provenance is unknown")
+    protocol["metric_protocol_known"] = all(protocol[name] is not None
+                                            for name in ("metric_protocol", "horizon_protocol", "horizon_units"))
     runs = defaultdict(list)
     for row in records:
         key = (row["method"], tuple(row[name] for name in configuration_keys), row["seed"])
@@ -45,12 +51,21 @@ def _protocol_check(records, configuration_keys):
             raise ValueError("Run contains known and unknown evaluated trajectory identities")
         # Preserve multiplicity, since duplicate sample rows change the weights.
         evaluated = sorted(Counter(_fingerprint(row["trajectory_id"]) for row in rows).items()) if all(present) else None
+        window_values = [_fingerprint({
+            "trajectory_id": row.get("trajectory_id"),
+            "rollout_steps": row.get("rollout_steps"),
+            "time_window": row.get("evaluation_time_window"),
+        }) for row in rows]
+        # Without sample IDs, legacy aggregates cannot establish matched sample
+        # multiplicities. Still reject explicitly different horizon definitions.
+        windows = sorted(Counter(window_values).items()) if all(present) else sorted(set(window_values))
         declared = fixed["test_trajectory_ids"]
         if declared is not None:
             if not isinstance(declared, (list, tuple)) or not declared:
                 raise ValueError("test_trajectory_ids must be a nonempty sequence")
             declared = sorted(_fingerprint(item) for item in declared)
-        identity = (_fingerprint(fixed["test_identity"]), _fingerprint(declared), _fingerprint(evaluated))
+        identity = (_fingerprint(fixed["test_identity"]), _fingerprint(declared),
+                    _fingerprint(evaluated), _fingerprint(windows))
         source = _fingerprint(fixed["dataset_identity"])
         known_test = fixed["test_identity"] is not None or declared is not None or evaluated is not None
         verified = (fixed["test_identity"] is not None
@@ -94,7 +109,7 @@ def configuration_macro(records: Iterable[Mapping[str, Any]], metric: str, *,
     """
     records = list(records)
     runs = _run_means(records, metric, configuration_keys)
-    protocol = _protocol_check(records, configuration_keys)
+    protocol = _protocol_check(records, configuration_keys, metric)
     cells: dict[tuple, list[float]] = defaultdict(list)
     for (method, configuration, seed), value in runs.items():
         cells[(method, configuration)].append(value)
@@ -121,7 +136,7 @@ def paired_seed_summary(records: Iterable[Mapping[str, Any]], metric: str, metho
         raise ValueError("A paired comparison requires two different methods")
     selected = [row for row in records if row.get("method") in (method_a, method_b)]
     runs = _run_means(selected, metric, configuration_keys)
-    protocol = _protocol_check(selected, configuration_keys)
+    protocol = _protocol_check(selected, configuration_keys, metric)
     first = {(configuration, seed): value for (method, configuration, seed), value in runs.items() if method == method_a}
     second = {(configuration, seed): value for (method, configuration, seed), value in runs.items() if method == method_b}
     if not first or first.keys() != second.keys():

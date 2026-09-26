@@ -152,11 +152,19 @@ change and may change fineRel.
   defaults require expressible/fine relative errors < 1, `q_fine` in
   `[1/1.25, 1.25]`, and `e_out < 0.10`, with fine band `(0.75, 1]` of the retained
   cutoff.
-- `detail_horizon_steps`: number of consecutive valid transitions from t=0,
-  stopping at the first failed state; zero if the initial state fails.
-- `detail_horizon_normalized`: valid transitions divided by rollout length.
+- `detail_horizon_steps`: number of consecutive valid predicted frames starting
+  at t=1, stopping at the first failed prediction. Later recovery does not extend
+  the horizon. The initial state is evaluated separately and does not gate it.
+- `detail_horizon_normalized`: valid predicted steps divided by rollout length.
   `detail_horizon` is an alias for this normalized value. Means include all
-  evaluated trajectories.
+  evaluated trajectories, including those whose initial state fails.
+
+Evaluation records `horizon_protocol` and `horizon_units`. Results that include
+t=0 in the horizon are a different metric and cannot be pooled with the current
+future-only horizon. `reevaluate` can score existing saved trajectories with the
+current definition without retraining; it writes to a new output directory and
+leaves the original metrics unchanged. The reporting helpers reject mixed
+protocols and require explicit protocol metadata when summarizing horizons.
 
 Undefined fine-energy ratios fail the detail test. Nonfinite diagnostics remain
 in the records as JSON strings: `"NaN"`, `"Infinity"`, `"-Infinity"` in saved
@@ -201,6 +209,17 @@ For matched model-seed comparisons, `config.paired_seed_configs(base, seeds)`
 generates DerivOpt/ArchMulti pairs by default. Report measured per-trajectory rows
 with `reporting.configuration_macro` and `reporting.paired_seed_summary`; the
 latter rejects incomplete pairs and reports sample SD, not standard error.
+
+ConvLSTM retains its hidden/cell state throughout each rollout and resets it
+between trajectories. Training uses short teacher-forced sequences (default
+`recurrent_training_steps=3`) with one-step loss at each frame, so the recurrent
+weights receive temporal gradients. RolloutMulti instead feeds predictions back
+for its configured multi-step loss. ArchMulti retains only its fine-branch recurrent state;
+the coarse branch supplies frame-local features. With the default ConvLSTM
+width 32 and depth 2, a 32-by-32 simulator grid retains 512 KiB per trajectory.
+Evaluation records this separately as `internal_recurrent_state_bytes`; it is
+not part of the external-state payload. Explicit custom widths/depths and grid
+sizes change this internal memory cost.
 Example for one common library/regime definition:
 
 ```python

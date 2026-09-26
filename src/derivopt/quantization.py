@@ -178,7 +178,9 @@ class ScalarQuantizer:
             unit = torch.tensor([value / maximum for value in values], dtype=torch.float64,
                                 device=codes.device).reshape(codes.shape)
             return ((unit*2-1)*radius*std+mean).to(dtype)
-        if not torch.isfinite(codes).all() or torch.any(codes < 0) or torch.any(codes > (1 << bits)-1):
+        if (codes.is_complex() or not torch.isfinite(codes).all()
+                or (codes.is_floating_point() and not torch.equal(codes, codes.round()))
+                or torch.any(codes < 0) or torch.any(codes > (1 << bits)-1)):
             raise ValueError("invalid scalar quantizer code")
         mean, std, radius = self._parameters(codes)
         return (((codes.double()/((1 << bits)-1))*2-1)*radius*std+mean).to(dtype)

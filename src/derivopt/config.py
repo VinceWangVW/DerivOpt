@@ -26,15 +26,23 @@ class ExperimentConfig:
     learning_rate: float = .001
     rollout_steps: int = 20
     rollout_supervision: int = 3
+    recurrent_training_steps: int = 3
     latent_rate_weight: float = .001
     latent_reconstruction_weight: float = 1.0
     validation_every: int = 50
     boundary_override: str | None = None
     boundary_parameters: dict = field(default_factory=dict)
-    model_kwargs: dict = field(default_factory=lambda: {"width": 16, "depth": 2, "modes": 8, "patch_size": 4, "num_heads": 4})
+    model_kwargs: dict | None = None
     latent_kwargs: dict = field(default_factory=dict)
     selector_max_nodes: int | None = None
     smoke: bool = False
+
+    def __post_init__(self):
+        if self.model_kwargs is None:
+            # Two width-32 recurrent layers retain 512 KiB of FP32 hidden/cell
+            # state per trajectory on the canonical 32 x 32 simulator grid.
+            self.model_kwargs = {"width": 32 if self.backbone == "convlstm" else 16,
+                                 "depth": 2, "modes": 8, "patch_size": 4, "num_heads": 4}
 
     def validate(self):
         if self.family not in FAMILY_CHANNELS or self.backbone not in BACKBONES:
@@ -49,7 +57,8 @@ class ExperimentConfig:
                 raise ValueError(f"{name} must be a finite number")
         if not 0 < self.budget_ratio <= 1 or not 0 < self.retain_frac <= 1:
             raise ValueError("budget and retain ratios must be in (0,1]")
-        for name in ("calibration_states", "train_steps", "batch_size", "rollout_steps", "rollout_supervision", "validation_every"):
+        for name in ("calibration_states", "train_steps", "batch_size", "rollout_steps", "rollout_supervision",
+                     "recurrent_training_steps", "validation_every"):
             if isinstance(getattr(self, name), bool) or not isinstance(getattr(self, name), int) or getattr(self, name) < 1:
                 raise ValueError(f"{name} must be a positive integer")
         for name in ("seed", "split_seed"):

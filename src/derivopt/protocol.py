@@ -7,6 +7,8 @@ RETAIN_FRACS = (0.125, 0.25, 0.5)
 CANONICAL = (0.25, 0.125)
 BACKBONES = ("unet", "fno", "convlstm", "transformer")
 MAIN_METHODS = ("primitive", "best_single", "derivbase", "derivopt", "archmulti", "rolloutmulti", "latent_hyper")
+HORIZON_PROTOCOL = "future_only_contiguous_prefix_v1; unconditional_trajectory_mean"
+HORIZON_UNITS = "normalized; detail_horizon_steps in prediction_steps"
 
 
 @dataclass(frozen=True)

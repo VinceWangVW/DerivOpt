@@ -3,7 +3,7 @@ import pytest
 from derivopt.config import ExperimentConfig, paired_seed_configs
 from derivopt.data import PDEBenchDataset, write_fixture
 from derivopt.preparation import prepare
-from derivopt.protocol import CANONICAL, select_canonical_from_pilot
+from derivopt.protocol import CANONICAL, HORIZON_PROTOCOL, HORIZON_UNITS, select_canonical_from_pilot
 from derivopt.reporting import configuration_macro, paired_seed_summary
 
 
@@ -78,7 +78,10 @@ def report_both(rows):
 
 
 @pytest.mark.parametrize("field,first,second", [("library", "primary", "shared"), ("split_seed", 0, 1),
-                                              ("library", "primary", None), ("split_seed", 0, None)])
+                                              ("library", "primary", None), ("split_seed", 0, None),
+                                              ("metric_protocol", {"tau_q": 1.25}, {"tau_q": 1.5}),
+                                              ("horizon_protocol", "including_t0", "after_t0"),
+                                              ("horizon_units", "normalized", "transitions")])
 def test_reporting_refuses_mixed_protocols(field, first, second):
     rows = [dict(record("advection", "a", 0, .1), **{field: first}),
             dict(record("advection", "b", 0, .2), **{field: second})]
@@ -124,3 +127,31 @@ def test_legacy_metrics_remain_usable_but_identity_is_explicitly_unknown():
     assert paired["protocol"]["library"] is None
     rows = [dict(record("advection", method, 0, .1), trajectory_id="one") for method in ("a", "b")]
     assert report_both(rows)[1]["protocol"]["test_identity_status_by_family"] == {"advection": "trajectory_ids_only"}
+
+
+@pytest.mark.parametrize("field,a,b", [("rollout_steps", 20, 100),
+                                      ("rollout_steps", 20, None),
+                                      ("evaluation_time_window", [0., 2.], [1., 3.])])
+def test_reporting_rejects_different_rollout_windows(field, a, b):
+    rows = [dict(record("advection", method, 0, .1), trajectory_id="one", **{field: value})
+            for method, value in (("a", a), ("b", b))]
+    with pytest.raises(ValueError, match="test identities"):
+        report_both(rows)
+
+
+@pytest.mark.parametrize("metric", ["detail_horizon", "detail_horizon_normalized", "detail_horizon_steps"])
+def test_horizon_reports_require_known_semantics_and_reject_initial_gated_mix(metric):
+    rows = [dict(record("advection", method, 0, .1), **{metric: .2},
+                 horizon_protocol=HORIZON_PROTOCOL, horizon_units=HORIZON_UNITS)
+            for method in ("a", "b")]
+    summarize_both = (configuration_macro, lambda records, key: paired_seed_summary(records, key, "a", "b"))
+    for summarize in summarize_both:
+        summarize(rows, metric)
+        unknown = [{key: value for key, value in row.items() if key != "horizon_protocol"} for row in rows]
+        with pytest.raises(ValueError, match="explicit horizon_protocol"):
+            summarize(unknown, metric)
+        old = dict(rows[0], horizon_protocol="longest_contiguous_prefix_including_t0; unconditional_trajectory_mean")
+        with pytest.raises(ValueError, match="horizon_protocol"):
+            summarize([old, rows[1]], metric)
+        with pytest.raises(ValueError, match="horizon_protocol"):
+            summarize([unknown[0], rows[1]], metric)

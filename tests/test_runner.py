@@ -12,7 +12,7 @@ from derivopt.config import ExperimentConfig
 from derivopt.data import PDEBenchDataset, split_trajectories, write_fixture
 from derivopt.io import dataset_identity, load_torch, save_json, save_torch
 from derivopt.preparation import PreparedState, prepare
-from derivopt.protocol import MetricProtocol
+from derivopt.protocol import HORIZON_PROTOCOL, MetricProtocol
 from derivopt.runner import _loss, build_simulator, environment, evaluate_checkpoint, evaluate_simulator, reevaluate, train
 from derivopt.simulation import BudgetedSimulator
 
@@ -47,6 +47,7 @@ def test_prepare_train_eval_reevaluate_and_exact_best_predictions(source, tmp_pa
     assert result["completed_steps"] == 2
     assert result["predictor_parameter_updated"] and result["nonzero_finite_gradient"]
     assert result["evaluation_checkpoint"] == "best"
+    assert result["evaluation"]["horizon_protocol"] == HORIZON_PROTOCOL
     assert math.isfinite(result["evaluation"]["summary"]["nrmse"])
     assert all(row["supervision_steps"] == 1 for row in result["history"])
     for name in ("best.pt.gz", "last.pt.gz", "results.json", "predictions.pt.gz"):
@@ -59,17 +60,32 @@ def test_prepare_train_eval_reevaluate_and_exact_best_predictions(source, tmp_pa
     evaluate_checkpoint(run_dir / "best.pt.gz", source, tmp_path / "eval", max_trajectories=1)
     original = load_torch(run_dir / "predictions.pt.gz")
     repeated = load_torch(tmp_path / "eval" / "predictions.pt.gz")
+    assert original["horizon_protocol"] == repeated["horizon_protocol"] == HORIZON_PROTOCOL
     for left, right in zip(original["predictions"], repeated["predictions"]):
         torch.testing.assert_close(left["predicted"], right["predicted"], rtol=0, atol=0)
         assert left["payload_bits"] == right["payload_bits"]
     revised = reevaluate(run_dir / "predictions.pt.gz", tmp_path / "reeval", MetricProtocol(tau_q=2.0, tau_out=0.2))
+    assert revised["horizon_protocol"] == revised["source_horizon_protocol"] == HORIZON_PROTOCOL
     for old, new in zip(result["evaluation"]["rows"], revised["rows"]):
         torch.testing.assert_close(old["timesteps"]["fine_rel"], new["timesteps"]["fine_rel"], equal_nan=True, rtol=0, atol=0)
     assert (tmp_path / "reeval" / "evaluation.json").is_file()
 
+    # Older prediction archives contain the same t0..T fields but no horizon
+    # metadata. Re-score their fields; do not reinterpret their old metric files.
+    legacy_path = tmp_path / "legacy-predictions.pt.gz"
+    save_torch({key: value for key, value in original.items() if key != "horizon_protocol"}, legacy_path)
+    legacy_bytes = legacy_path.read_bytes()
+    rescored = reevaluate(legacy_path, tmp_path / "legacy-reeval", MetricProtocol())
+    assert rescored["source_horizon_protocol"] is None
+    assert rescored["horizon_protocol"] == HORIZON_PROTOCOL
+    assert rescored["summary"] == result["evaluation"]["summary"]
+    assert legacy_path.read_bytes() == legacy_bytes
 
-def test_resume_matches_continuous_updates_without_recalibration(source, tmp_path, monkeypatch):
-    config = small_config(train_steps=2)
+
+@pytest.mark.parametrize("backbone,method", [("fno", "derivopt"), ("convlstm", "derivopt"),
+                                              ("convlstm", "archmulti"), ("convlstm", "rolloutmulti")])
+def test_resume_matches_continuous_updates_without_recalibration(source, tmp_path, monkeypatch, backbone, method):
+    config = small_config(train_steps=2, backbone=backbone, method=method)
     first_dir, resumed_dir, continuous_dir = (tmp_path / name for name in ("first", "resumed", "continuous"))
     train(source, config, first_dir)
     continuous = train(source, replace(config, train_steps=3), continuous_dir)
@@ -79,6 +95,9 @@ def test_resume_matches_continuous_updates_without_recalibration(source, tmp_pat
 
     monkeypatch.setattr("derivopt.runner.prepare", forbidden_recalibration)
     resumed = train(source, replace(config, train_steps=1), resumed_dir, resume_path=first_dir / "last.pt.gz")
+    if backbone == "convlstm":
+        assert all(row["internal_recurrent_state_bytes"] == 2 * 4 * 16 * 4
+                   for row in resumed["evaluation"]["rows"])
     assert resumed["completed_steps"] == continuous["completed_steps"] == 3
     assert [row["step"] for row in resumed["history"]] == [1, 2, 3]
     assert resumed["executed_steps"] == 1
@@ -102,6 +121,35 @@ def test_rolloutmulti_really_trains_three_feedback_steps(source, tmp_path):
     assert all(row["supervision_steps"] == 3 for row in result["history"])
     assert all(len(row["payload_bits"]) == 3 * config.batch_size for row in result["history"])
     assert result["predictor_parameter_updated"]
+
+
+@pytest.mark.parametrize("method", ["derivopt", "archmulti", "rolloutmulti"])
+def test_recurrent_sequence_learns_memory_without_confusing_teacher_and_rollout_feedback(source, method):
+    config = small_config(backbone="convlstm", method=method)
+    prepared = prepare(PDEBenchDataset(source, "advection"), config)
+    model = build_simulator(prepared, config)
+    states = PDEBenchDataset(source, "advection")[0].states
+    inputs, predictions = [], []
+    original_step = model.step
+
+    def record_step(current, **kwargs):
+        inputs.append(current.detach().clone())
+        predicted, info = original_step(current, **kwargs)
+        predictions.append(predicted.detach().clone())
+        return predicted, info
+
+    model.step = record_step
+    loss, _ = _loss(model, states[:1], states[1:4].unsqueeze(0), config)
+    loss.backward()
+    assert len(inputs) == 3
+    for index in (1, 2):
+        expected = predictions[index-1] if method == "rolloutmulti" else states[index:index+1]
+        torch.testing.assert_close(inputs[index], expected, rtol=0, atol=0)
+    recurrent = model.predictor.fine_branch if method == "archmulti" else model.predictor
+    cell = recurrent.cells[0]
+    width = cell.hidden_channels
+    assert cell.gates.weight.grad[:, -width:].abs().sum() > 0
+    assert cell.gates.weight.grad[width:2*width].abs().sum() > 0
 
 
 def test_latent_training_uses_real_records_and_saves_decodable_model(source, tmp_path):

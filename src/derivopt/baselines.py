@@ -17,6 +17,10 @@ class ArchMulti(nn.Module):
     Coarse features are linearly/bilinearly interpolated back and concatenated
     with fine features before learned pointwise fusion. This module only changes
     the model: it neither implements nor bypasses an external carried-state codec.
+
+    For ConvLSTM, only the fine branch retains temporal state. The coarse branch
+    is a frame-local multiscale feature path. Thus the persistent hidden/cell
+    tensors have the same shapes and memory cost as the single-scale backbone.
     """
 
     def __init__(self, factory: Callable[[int, int], nn.Module], spatial_dim: int,
@@ -38,6 +42,10 @@ class ArchMulti(nn.Module):
         coarse_parameters = {id(parameter) for parameter in self.coarse_branch.parameters()}
         if self.fine_branch is self.coarse_branch or fine_parameters & coarse_parameters:
             raise ValueError("factory must create independent branch parameters, not reuse a model")
+        from .models import ConvLSTM
+        if isinstance(self.coarse_branch, ConvLSTM):
+            self.coarse_branch.stateful = False
+            self.coarse_branch.architecture_metadata["stateful"] = False
         conv = nn.Conv1d if spatial_dim == 1 else nn.Conv2d
         self.fusion = nn.Sequential(conv(2 * width, width, 1), nn.GELU(), conv(width, out_channels, 1))
         self.architecture_metadata = {
@@ -47,6 +55,7 @@ class ArchMulti(nn.Module):
             "upsample": "linear" if spatial_dim == 1 else "bilinear", "align_corners": False,
             "fusion": "concat_pointwise_gelu_pointwise", "branch_parameters": "independent",
             "backbone": dict(getattr(self.fine_branch, "architecture_metadata", {})),
+            "persistent_recurrence": "fine_branch_only",
         }
 
     def reset_state(self) -> None:

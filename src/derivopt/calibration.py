@@ -292,8 +292,9 @@ def calibrate(
         raise ValueError("Calibration requires at least two finite training states")
     if not candidates or any(candidate.state_components != training.shape[1] for candidate in candidates):
         raise ValueError("Candidate library must match the primitive state components")
-    if tuple(resampler.fine_basis.shape) != basis.shape or resampler.fine_basis.lengths != basis.lengths:
-        raise ValueError("Resampler and calibration basis must agree")
+    for attribute in ("shape", "lengths", "boundaries", "robin_coefficients"):
+        if getattr(resampler.fine_basis, attribute) != getattr(basis, attribute):
+            raise ValueError(f"Resampler and calibration basis must agree on {attribute}")
     if not noise_floor > 0:
         raise ValueError("noise_floor must be positive")
     widths = tuple(sorted(set(int(value) for value in bit_widths)))

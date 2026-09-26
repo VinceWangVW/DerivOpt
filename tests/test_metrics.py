@@ -138,10 +138,10 @@ def test_nonradial_expressible_mask_is_respected():
     assert torch.equal(fine, mask & (frequency > .75 * frequency[mask].max()))
 
 
-def test_horizon_is_prefix_and_normalized_by_transitions():
+def test_horizon_is_future_prefix_and_normalized_by_prediction_count():
     passed = torch.tensor([[False, True, True, True], [True, False, True, True],
                            [True, True, False, True], [True, True, True, True]])
-    assert torch.allclose(detail_horizon(passed), torch.tensor([0., 0., 1/3, 1.], dtype=torch.float64))
+    assert torch.allclose(detail_horizon(passed), torch.tensor([1., 0., 1/3, 1.], dtype=torch.float64))
     assert detail_horizon(torch.tensor([[True]])).item() == 0
     with pytest.raises(ValueError):
         detail_horizon(torch.empty(1, 0, dtype=torch.bool))

@@ -70,9 +70,9 @@ def test_convlstm_state_forwarding_and_sequence_gradient(shape):
     assert not torch.allclose(first, second)
     (first.square().mean() + second.square().mean()).backward()
     model.detach_state()
-    for branch in (model.fine_branch, model.coarse_branch):
-        assert branch._state is not None
-        assert all(h.grad_fn is None and c.grad_fn is None for h, c in branch._state)
+    assert model.fine_branch._state is not None
+    assert all(h.grad_fn is None and c.grad_fn is None for h, c in model.fine_branch._state)
+    assert model.coarse_branch._state is None
     model.reset_state()
     assert model.fine_branch._state is None and model.coarse_branch._state is None
     torch.testing.assert_close(model(inputs), first.detach(), rtol=0, atol=0)
