@@ -1,0 +1,19 @@
+{
+  "family": "advection",
+  "backbone": "fno",
+  "method": "rolloutmulti",
+  "budget_ratio": 0.25,
+  "retain_frac": 0.125,
+  "library": "primary",
+  "seed": 0,
+  "split_seed": 0,
+  "calibration_states": 6,
+  "train_steps": 2,
+  "batch_size": 1,
+  "learning_rate": 0.001,
+  "rollout_steps": 3,
+  "rollout_supervision": 3,
+  "validation_every": 1,
+  "model_kwargs": {"width": 4, "depth": 1, "modes": 2, "patch_size": 2, "num_heads": 1},
+  "smoke": true
+}

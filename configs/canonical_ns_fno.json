@@ -1,0 +1,18 @@
+{
+  "family": "incompressible_ns",
+  "backbone": "fno",
+  "method": "derivopt",
+  "budget_ratio": 0.25,
+  "retain_frac": 0.125,
+  "library": "primary",
+  "seed": 0,
+  "split_seed": 0,
+  "calibration_states": 32,
+  "train_steps": 1000,
+  "batch_size": 4,
+  "learning_rate": 0.001,
+  "rollout_steps": 20,
+  "validation_every": 50,
+  "model_kwargs": {"width": 16, "depth": 2, "modes": 8, "patch_size": 4, "num_heads": 4},
+  "smoke": false
+}
